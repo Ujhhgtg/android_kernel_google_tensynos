@@ -1,0 +1,410 @@
+name: Build Kernel
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Target Device"
+        type: choice
+        options:
+          - gs201  # Tensor G2 (Pixel 7/7 Pro)
+          - gs101  # Tensor G1 (Pixel 6/6 Pro)
+        default: gs201
+      build_ksu:
+        description: "Build with KernelSU"
+        type: boolean
+        default: true
+      ksu_branch:
+        description: "KernelSU branch or commit (empty = latest main)"
+        type: string
+        required: false
+        default: ""
+      create_release:
+        description: "Create Release"
+        type: boolean
+        default: false
+
+  push:
+    branches:
+      - anaconda-tensynos-qpr3
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - '!.github/workflows/build-kernel.yml'
+
+jobs:
+  build:
+    name: Build Kernel for ${{ inputs.device || 'gs201' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: false
+
+    - name: Setup Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 12
+
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc \
+          bison \
+          build-essential \
+          ccache \
+          curl \
+          flex \
+          g++-multilib \
+          gcc-multilib \
+          git \
+          gnupg \
+          gperf \
+          lib32ncurses5-dev \
+          lib32z1-dev \
+          libc6-dev-i386 \
+          libelf-dev \
+          libgl1-mesa-dev \
+          libssl-dev \
+          libx11-dev \
+          libxml2-utils \
+          lzop \
+          python3 \
+          rsync \
+          schedtool \
+          squashfs-tools \
+          unzip \
+          x11proto-core-dev \
+          xsltproc \
+          zip \
+          zlib1g-dev
+
+        # Setup ccache
+        echo "/usr/lib/ccache" >> $GITHUB_PATH
+        ccache -M 5G
+        ccache -z
+
+    - name: Setup Clang Toolchain
+      run: |
+        mkdir -p "${HOME}/toolchains"
+        cd "${HOME}/toolchains"
+
+        # Download prebuilt clang for Android kernel
+        CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz"
+        wget -q "$CLANG_URL" -O clang.tar.gz
+        mkdir -p clang-r530567
+        tar -xzf clang.tar.gz -C clang-r530567
+        rm clang.tar.gz
+
+        echo "CLANG_PATH=${HOME}/toolchains/clang-r530567" >> $GITHUB_ENV
+        echo "${HOME}/toolchains/clang-r530567/bin" >> $GITHUB_PATH
+
+    - name: Setup KernelSU
+      if: ${{ inputs.build_ksu == true || inputs.build_ksu == '' }}
+      run: |
+        cd "${GITHUB_WORKSPACE}"
+
+        KSU_REPO="https://github.com/tiann/KernelSU.git"
+        KSU_BRANCH="${{ inputs.ksu_branch }}"
+
+        if [ -z "$KSU_BRANCH" ]; then
+          KSU_BRANCH="main"
+        fi
+
+        # Clone KernelSU
+        echo "Cloning KernelSU from branch: $KSU_BRANCH"
+        git clone --depth=1 --branch "$KSU_BRANCH" "$KSU_REPO" KernelSU
+
+        cd KernelSU
+        KSU_COMMIT=$(git rev-parse HEAD)
+        KSU_VERSION=$(git rev-list --count HEAD)
+
+        echo "KSU_COMMIT=$KSU_COMMIT" >> $GITHUB_ENV
+        echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+
+        # Integrate KernelSU into kernel
+        cd "${GITHUB_WORKSPACE}"
+
+        # Add KernelSU to Makefile if not already present
+        if ! grep -q "kernelsu" Makefile; then
+          sed -i '/^obj-y += kernel\//a obj-y += KernelSU/' Makefile
+        fi
+
+        echo "KernelSU integrated successfully"
+
+    - name: Get Kernel Info
+      id: kernel_info
+      run: |
+        VERSION=$(grep "^VERSION = " Makefile | awk '{print $3}')
+        PATCHLEVEL=$(grep "^PATCHLEVEL = " Makefile | awk '{print $3}')
+        SUBLEVEL=$(grep "^SUBLEVEL = " Makefile | awk '{print $3}')
+        KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+
+        echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+        echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+
+        BUILD_DATE=$(date +%Y%m%d)
+        echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+
+    - name: Configure Kernel
+      run: |
+        cd "${GITHUB_WORKSPACE}"
+
+        DEVICE="${{ inputs.device }}"
+        if [ -z "$DEVICE" ]; then
+          DEVICE="gs201"
+        fi
+
+        # Use the appropriate defconfig
+        if [ -f "arch/arm64/configs/${DEVICE}_gki_defconfig" ]; then
+          DEFCONFIG="${DEVICE}_gki_defconfig"
+        elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
+          DEFCONFIG="gki_defconfig"
+        else
+          echo "Error: No suitable defconfig found"
+          exit 1
+        fi
+
+        echo "Using defconfig: $DEFCONFIG"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        export CC="${CLANG_PATH}/bin/clang"
+        export LD="${CLANG_PATH}/bin/ld.lld"
+        export AR="${CLANG_PATH}/bin/llvm-ar"
+        export NM="${CLANG_PATH}/bin/llvm-nm"
+        export OBJCOPY="${CLANG_PATH}/bin/llvm-objcopy"
+        export OBJDUMP="${CLANG_PATH}/bin/llvm-objdump"
+        export READELF="${CLANG_PATH}/bin/llvm-readelf"
+        export STRIP="${CLANG_PATH}/bin/llvm-strip"
+
+        make O=out ARCH=arm64 $DEFCONFIG
+
+        # Enable KernelSU config if building with KSU
+        if [ "${{ inputs.build_ksu }}" = "true" ]; then
+          echo "CONFIG_KPROBES=y" >> out/.config
+          echo "CONFIG_HAVE_KPROBES=y" >> out/.config
+          echo "CONFIG_KPROBE_EVENTS=y" >> out/.config
+        fi
+
+        make O=out ARCH=arm64 olddefconfig
+
+    - name: Build Kernel
+      run: |
+        cd "${GITHUB_WORKSPACE}"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        export CC="${CLANG_PATH}/bin/clang"
+        export LD="${CLANG_PATH}/bin/ld.lld"
+        export AR="${CLANG_PATH}/bin/llvm-ar"
+        export NM="${CLANG_PATH}/bin/llvm-nm"
+        export OBJCOPY="${CLANG_PATH}/bin/llvm-objcopy"
+        export OBJDUMP="${CLANG_PATH}/bin/llvm-objdump"
+        export READELF="${CLANG_PATH}/bin/llvm-readelf"
+        export STRIP="${CLANG_PATH}/bin/llvm-strip"
+
+        START_TIME=$(date +%s)
+
+        make -j$(nproc --all) O=out ARCH=arm64 \
+          CC="${CC}" \
+          LD="${LD}" \
+          AR="${AR}" \
+          NM="${NM}" \
+          OBJCOPY="${OBJCOPY}" \
+          OBJDUMP="${OBJDUMP}" \
+          READELF="${READELF}" \
+          STRIP="${STRIP}" \
+          Image.lz4 dtbs modules
+
+        END_TIME=$(date +%s)
+        BUILD_TIME=$((END_TIME - START_TIME))
+        echo "Build completed in $((BUILD_TIME / 60)) minutes and $((BUILD_TIME % 60)) seconds"
+
+        # Show ccache stats
+        ccache -s
+
+    - name: Prepare AnyKernel3
+      run: |
+        cd "${GITHUB_WORKSPACE}"
+
+        # Clone AnyKernel3
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+        cd AnyKernel3
+        rm -rf .git .github README.md
+
+        # Copy kernel image
+        cp "${GITHUB_WORKSPACE}/out/arch/arm64/boot/Image.lz4" ./
+
+        # Copy DTBs if they exist
+        if [ -d "${GITHUB_WORKSPACE}/out/arch/arm64/boot/dts/google" ]; then
+          mkdir -p dtbs
+          find "${GITHUB_WORKSPACE}/out/arch/arm64/boot/dts/google" -name "*.dtb" -exec cp {} dtbs/ \;
+        fi
+
+        # Update anykernel.sh
+        cat > anykernel.sh << 'EOF'
+# AnyKernel3 Ramdisk Mod Script
+# osm0sis @ xda-developers
+
+## AnyKernel setup
+properties() { '
+kernel.string=Tensynos Kernel by Ujhhgtg
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=oriole
+device.name2=raven
+device.name3=bluejay
+device.name4=panther
+device.name5=cheetah
+supported.versions=13-15
+supported.patchlevels=
+'; }
+
+## shell variables
+block=/dev/block/by-name/boot;
+is_slot_device=1;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
+
+## AnyKernel methods (DO NOT CHANGE)
+. tools/ak3-core.sh;
+
+## AnyKernel boot install
+dump_boot;
+
+write_boot;
+EOF
+
+    - name: Create Release Package
+      id: package
+      run: |
+        cd "${GITHUB_WORKSPACE}/AnyKernel3"
+
+        DEVICE="${{ inputs.device }}"
+        if [ -z "$DEVICE" ]; then
+          DEVICE="gs201"
+        fi
+
+        BUILD_DATE="${{ steps.kernel_info.outputs.build_date }}"
+        SHORT_SHA="${{ steps.kernel_info.outputs.short_sha }}"
+        KERNEL_VERSION="${{ steps.kernel_info.outputs.kernel_version }}"
+
+        if [ "${{ inputs.build_ksu }}" = "true" ]; then
+          KSU_SUFFIX="-KSU"
+        else
+          KSU_SUFFIX=""
+        fi
+
+        ZIP_NAME="Tensynos-${DEVICE}-${KERNEL_VERSION}${KSU_SUFFIX}-${BUILD_DATE}-${SHORT_SHA}.zip"
+
+        zip -r9 "../${ZIP_NAME}" * -x .git .github README.md
+
+        echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP_NAME }}
+        path: ${{ env.ZIP_NAME }}
+        compression-level: 0
+
+    - name: Generate Release Notes
+      if: ${{ inputs.create_release == true }}
+      id: release_notes
+      run: |
+        DEVICE="${{ inputs.device }}"
+        if [ -z "$DEVICE" ]; then
+          DEVICE="gs201"
+        fi
+
+        cat > release_notes.md << EOF
+        ## Tensynos Kernel - ${{ steps.kernel_info.outputs.kernel_version }}
+
+        **Build Date:** $(date +"%Y-%m-%d %H:%M UTC")
+        **Device:** ${DEVICE}
+        **Kernel Version:** ${{ steps.kernel_info.outputs.kernel_version }}
+        **Commit:** ${{ steps.kernel_info.outputs.short_sha }}
+
+        ### Features
+        - Linux Kernel ${{ steps.kernel_info.outputs.kernel_version }}
+        $(if [ "${{ inputs.build_ksu }}" = "true" ]; then echo "- KernelSU v${KSU_VERSION} (commit: ${KSU_COMMIT:0:7})"; fi)
+        - ReKernel-X LKM integrated
+        - Unicode bypass fix
+        - Optimized for Google Tensor devices
+
+        ### Installation
+        1. Download the ZIP file
+        2. Boot into recovery (TWRP recommended)
+        3. Flash the ZIP
+        4. Reboot
+
+        ### Notes
+        - Make sure to backup your current boot image before flashing
+        - Compatible with Android 13-15
+        EOF
+
+    - name: Create Release
+      if: ${{ inputs.create_release == true }}
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.kernel_info.outputs.build_date }}-${{ steps.kernel_info.outputs.short_sha }}
+        name: Tensynos Kernel - ${{ steps.kernel_info.outputs.kernel_version }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: ${{ env.ZIP_NAME }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build Summary
+      if: always()
+      run: |
+        {
+          echo "## Build Summary"
+          echo ""
+          echo "| Item | Value |"
+          echo "|------|-------|"
+          echo "| **Status** | ${{ job.status }} |"
+          echo "| **Kernel Version** | ${{ steps.kernel_info.outputs.kernel_version }} |"
+          echo "| **Device** | ${{ inputs.device || 'gs201' }} |"
+          echo "| **Build Date** | ${{ steps.kernel_info.outputs.build_date }} |"
+          echo "| **Commit** | ${{ steps.kernel_info.outputs.short_sha }} |"
+          echo "| **KernelSU** | ${{ inputs.build_ksu || 'false' }} |"
+          if [ "${{ inputs.build_ksu }}" = "true" ]; then
+            echo "| **KSU Version** | ${KSU_VERSION} |"
+            echo "| **KSU Commit** | ${KSU_COMMIT:0:7} |"
+          fi
+          echo "| **Package** | ${{ env.ZIP_NAME }} |"
+        } >> $GITHUB_STEP_SUMMARY
