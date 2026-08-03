@@ -75,6 +75,8 @@ jobs:
           flex \
           g++-multilib \
           gcc-multilib \
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu \
           git \
           gnupg \
           gperf \
