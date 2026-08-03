@@ -182,13 +182,10 @@ jobs:
           DEVICE="gs201"
         fi
 
-        # Use the appropriate defconfig
-        if [ -f "arch/arm64/configs/${DEVICE}_gki_defconfig" ]; then
-          DEFCONFIG="${DEVICE}_gki_defconfig"
-        elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
-          DEFCONFIG="gki_defconfig"
-        else
-          echo "Error: No suitable defconfig found"
+        # Device kernels require their SoC-specific configuration.
+        DEFCONFIG="${DEVICE}_defconfig"
+        if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
+          echo "Error: No defconfig found for device: $DEVICE"
           exit 1
         fi
 
@@ -211,6 +208,9 @@ jobs:
         fi
 
         make O=out ARCH=arm64 LLVM=1 olddefconfig
+
+        SOC_CONFIG="CONFIG_SOC_${DEVICE^^}=y"
+        grep -qx "$SOC_CONFIG" out/.config
 
         if [ "$BUILD_KSU" = "true" ]; then
           grep -qx 'CONFIG_KSU=y' out/.config
