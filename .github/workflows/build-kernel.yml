@@ -154,15 +154,7 @@ jobs:
         echo "KSU_COMMIT=$KSU_COMMIT" >> $GITHUB_ENV
         echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
-        # Integrate KernelSU into kernel
-        cd "${GITHUB_WORKSPACE}"
-
-        # Add KernelSU to Makefile if not already present
-        if ! grep -q "kernelsu" Makefile; then
-          sed -i '/^obj-y += kernel\//a obj-y += KernelSU/' Makefile
-        fi
-
-        echo "KernelSU integrated successfully"
+        echo "KernelSU checkout ready"
 
     - name: Get Kernel Info
       id: kernel_info
@@ -210,12 +202,20 @@ jobs:
 
         # Enable KernelSU config if building with KSU
         if [ "$BUILD_KSU" = "true" ]; then
-          echo "CONFIG_KPROBES=y" >> out/.config
-          echo "CONFIG_HAVE_KPROBES=y" >> out/.config
-          echo "CONFIG_KPROBE_EVENTS=y" >> out/.config
+          scripts/config --file out/.config \
+            --enable KSU \
+            --enable KPROBES \
+            --enable KPROBE_EVENTS \
+            --enable DEBUG_KERNEL \
+            --enable KALLSYMS_ALL
         fi
 
         make O=out ARCH=arm64 LLVM=1 olddefconfig
+
+        if [ "$BUILD_KSU" = "true" ]; then
+          grep -qx 'CONFIG_KSU=y' out/.config
+          grep -qx 'CONFIG_KALLSYMS_ALL=y' out/.config
+        fi
 
     - name: Build Kernel
       run: |
