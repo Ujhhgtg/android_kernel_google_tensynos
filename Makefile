@@ -933,8 +933,8 @@ KBUILD_CPPFLAGS += -Qunused-arguments
 KBUILD_CFLAGS += -Wno-gnu
 # Disable -Wmacro-redefined to prevent compilation errors in newer Clang 22
 KBUILD_CFLAGS += -Wno-macro-redefined
-# Disbale -Wuninitialized-const-pointer to prevent compilation errors in newer Clang 22
-KBUILD_CFLAGS += -Wno-uninitialized-const-pointer
+# Disable -Wuninitialized-const-pointer when supported by the selected Clang.
+KBUILD_CFLAGS += $(call cc-disable-warning, uninitialized-const-pointer)
 # Disable -Wsometimes-uninitialized to prevent compilation errors in newer Clang 22
 KBUILD_CFLAGS += -Wno-sometimes-uninitialized
 # Disable -Wuninitialized to prevent compilation errors in newer Clang 22
