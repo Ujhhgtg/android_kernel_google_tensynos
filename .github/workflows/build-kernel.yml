@@ -117,6 +117,11 @@ jobs:
           KSU_BRANCH="main"
         fi
 
+        # Remove existing KernelSU directory if empty
+        if [ -d "KernelSU" ] && [ -z "$(ls -A KernelSU)" ]; then
+          rm -rf KernelSU
+        fi
+
         # Clone KernelSU
         echo "Cloning KernelSU from branch: $KSU_BRANCH"
         git clone --depth=1 --branch "$KSU_BRANCH" "$KSU_REPO" KernelSU
