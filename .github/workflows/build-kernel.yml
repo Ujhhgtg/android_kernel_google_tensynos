@@ -41,6 +41,8 @@ jobs:
     name: Build Kernel for ${{ inputs.device || 'gs201' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      BUILD_KSU: ${{ github.event_name != 'workflow_dispatch' || inputs.build_ksu == true }}
 
     steps:
     - name: Checkout Repository
@@ -106,25 +108,44 @@ jobs:
         echo "${HOME}/toolchains/clang-r530567/bin" >> $GITHUB_PATH
 
     - name: Setup KernelSU
-      if: ${{ inputs.build_ksu == true || inputs.build_ksu == '' }}
+      if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_ksu == true }}
       run: |
         cd "${GITHUB_WORKSPACE}"
 
-        KSU_REPO="https://github.com/tiann/KernelSU.git"
-        KSU_BRANCH="${{ inputs.ksu_branch }}"
+        KSU_REPO="$(git config --file .gitmodules --get submodule.KernelSU.url || true)"
+        KSU_REF="${{ inputs.ksu_branch }}"
 
-        if [ -z "$KSU_BRANCH" ]; then
-          KSU_BRANCH="main"
+        if [ -z "$KSU_REPO" ]; then
+          KSU_REPO="https://github.com/ReSukiSU/ReSukiSU.git"
         fi
 
-        # Remove existing KernelSU directory if empty
-        if [ -d "KernelSU" ] && [ -z "$(ls -A KernelSU)" ]; then
-          rm -rf KernelSU
+        if [ -z "$KSU_REF" ]; then
+          KSU_REF="$(git config --file .gitmodules --get submodule.KernelSU.branch || true)"
         fi
 
-        # Clone KernelSU
-        echo "Cloning KernelSU from branch: $KSU_BRANCH"
-        git clone --depth=1 --branch "$KSU_BRANCH" "$KSU_REPO" KernelSU
+        if [ -z "$KSU_REF" ]; then
+          KSU_REF="main"
+        fi
+
+        # Reuse the checked-out submodule instead of cloning over it.
+        git submodule sync -- KernelSU
+        git submodule update --init --depth=1 -- KernelSU
+
+        if ! git -C KernelSU rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+          echo "Error: KernelSU checkout is not a git repository"
+          exit 1
+        fi
+
+        git -C KernelSU remote set-url origin "$KSU_REPO"
+
+        echo "Checking out KernelSU ref: $KSU_REF"
+        if git -C KernelSU fetch --depth=1 origin "$KSU_REF"; then
+          git -C KernelSU checkout --detach FETCH_HEAD
+        else
+          echo "Shallow fetch failed for $KSU_REF, retrying with full history"
+          git -C KernelSU fetch --unshallow origin || git -C KernelSU fetch origin
+          git -C KernelSU checkout --detach "$KSU_REF"
+        fi
 
         cd KernelSU
         KSU_COMMIT=$(git rev-parse HEAD)
@@ -188,7 +209,7 @@ jobs:
         make O=out ARCH=arm64 LLVM=1 $DEFCONFIG
 
         # Enable KernelSU config if building with KSU
-        if [ "${{ inputs.build_ksu }}" = "true" ]; then
+        if [ "$BUILD_KSU" = "true" ]; then
           echo "CONFIG_KPROBES=y" >> out/.config
           echo "CONFIG_HAVE_KPROBES=y" >> out/.config
           echo "CONFIG_KPROBE_EVENTS=y" >> out/.config
@@ -284,7 +305,7 @@ jobs:
         SHORT_SHA="${{ steps.kernel_info.outputs.short_sha }}"
         KERNEL_VERSION="${{ steps.kernel_info.outputs.kernel_version }}"
 
-        if [ "${{ inputs.build_ksu }}" = "true" ]; then
+        if [ "$BUILD_KSU" = "true" ]; then
           KSU_SUFFIX="-KSU"
         else
           KSU_SUFFIX=""
@@ -323,7 +344,7 @@ jobs:
 
         ### Features
         - Linux Kernel ${{ steps.kernel_info.outputs.kernel_version }}
-        $(if [ "${{ inputs.build_ksu }}" = "true" ]; then echo "- KernelSU v${KSU_VERSION} (commit: ${KSU_COMMIT:0:7})"; fi)
+        $(if [ "$BUILD_KSU" = "true" ]; then echo "- KernelSU v${KSU_VERSION} (commit: ${KSU_COMMIT:0:7})"; fi)
         - ReKernel-X LKM integrated
         - Unicode bypass fix
         - Optimized for Google Tensor devices
@@ -341,7 +362,7 @@ jobs:
 
     - name: Create Release
       if: ${{ inputs.create_release == true }}
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: v${{ steps.kernel_info.outputs.build_date }}-${{ steps.kernel_info.outputs.short_sha }}
         name: Tensynos Kernel - ${{ steps.kernel_info.outputs.kernel_version }}
@@ -365,8 +386,8 @@ jobs:
           echo "| **Device** | ${{ inputs.device || 'gs201' }} |"
           echo "| **Build Date** | ${{ steps.kernel_info.outputs.build_date }} |"
           echo "| **Commit** | ${{ steps.kernel_info.outputs.short_sha }} |"
-          echo "| **KernelSU** | ${{ inputs.build_ksu || 'false' }} |"
-          if [ "${{ inputs.build_ksu }}" = "true" ]; then
+          echo "| **KernelSU** | $BUILD_KSU |"
+          if [ "$BUILD_KSU" = "true" ]; then
             echo "| **KSU Version** | ${KSU_VERSION} |"
             echo "| **KSU Commit** | ${KSU_COMMIT:0:7} |"
           fi
