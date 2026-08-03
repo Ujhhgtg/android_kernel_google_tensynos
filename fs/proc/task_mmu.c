@@ -375,6 +375,22 @@ static int show_vma_header_prefix(struct seq_file *m, unsigned long start,
 				  unsigned long long pgoff, dev_t dev,
 				  unsigned long ino)
 {
+#if CONFIG_ARM64_VA_BITS > 40
+	seq_setwidth(m, 25 + sizeof(void *) * 6 - 1);
+	seq_put_hex_ll(m, NULL, start, 8);
+	seq_put_hex_ll(m, "-", end, 8);
+	seq_putc(m, ' ');
+	seq_putc(m, flags & VM_READ ? 'r' : '-');
+	seq_putc(m, flags & VM_WRITE ? 'w' : '-');
+	seq_putc(m, flags & VM_EXEC ? 'x' : '-');
+	seq_putc(m, flags & VM_MAYSHARE ? 's' : 'p');
+	seq_put_hex_ll(m, " ", pgoff, 8);
+	seq_put_hex_ll(m, " ", MAJOR(dev), 2);
+	seq_put_hex_ll(m, ":", MINOR(dev), 2);
+	seq_put_decimal_ull(m, " ", ino);
+	seq_putc(m, ' ');
+	return 0;
+#else
 	size_t len;
 	char *out;
 
@@ -383,9 +399,6 @@ static int show_vma_header_prefix(struct seq_file *m, unsigned long start,
 		seq_commit(m, -1);
 		return -ENOMEM;
 	}
-
-	/* Supports printing up to 40 bits per virtual address */
-	BUILD_BUG_ON(CONFIG_ARM64_VA_BITS > 40);
 
 	len = print_vma_hex10(out, start, __builtin_clzl);
 
@@ -418,6 +431,7 @@ static int show_vma_header_prefix(struct seq_file *m, unsigned long start,
 
 	m->count += len;
 	return 0;
+#endif
 }
 
 static void show_vma_header_prefix_fake(struct seq_file *m,
