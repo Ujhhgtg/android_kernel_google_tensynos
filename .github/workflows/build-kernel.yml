@@ -204,7 +204,9 @@ jobs:
             --enable KPROBES \
             --enable KPROBE_EVENTS \
             --enable DEBUG_KERNEL \
-            --enable KALLSYMS_ALL
+            --enable KALLSYMS_ALL \
+            --enable FTRACE \
+            --disable ANDROID_ONLY_VH_TRACING
         fi
 
         make O=out ARCH=arm64 LLVM=1 olddefconfig
@@ -215,6 +217,11 @@ jobs:
         if [ "$BUILD_KSU" = "true" ]; then
           grep -qx 'CONFIG_KSU=y' out/.config
           grep -qx 'CONFIG_KALLSYMS_ALL=y' out/.config
+          grep -qx 'CONFIG_FTRACE=y' out/.config
+          if grep -q '^CONFIG_ANDROID_ONLY_VH_TRACING=y$' out/.config; then
+            echo "Error: Android-only vendor-hook tracing leaves KernelSU tracepoint helpers unavailable"
+            exit 1
+          fi
         fi
 
     - name: Build Kernel
